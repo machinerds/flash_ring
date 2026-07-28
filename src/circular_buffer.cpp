@@ -189,6 +189,7 @@ uint32_t CircularBuffer::get_record_num() { return record_num; }
  * @return ESP_OK if ok
  */
 esp_err_t CircularBuffer::delete_front() {
+    if (record_num == 0) { return ESP_ERR_NOT_FOUND; }
     size_t sec_size = wl_sector_size(wl_handle);
     if (sec_size - (front % sec_size) >= 2 * record_size) { front += record_size; }
     else { front = ((front / sec_size) + 1) % sec_num() * sec_size; }
