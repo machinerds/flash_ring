@@ -1,4 +1,5 @@
 .pio
 .vscode
 /test/data
+/test/native/data
 /build
