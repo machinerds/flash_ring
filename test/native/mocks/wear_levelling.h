@@ -35,12 +35,6 @@ typedef int32_t esp_err_t;
 
 typedef int32_t wl_handle_t;
 
-#define ESP_OK 0
-#define ESP_FAIL -1
-#define ESP_ERR_INVALID_ARG -2
-#define ESP_ERR_INVALID_SIZE -3
-#define ESP_ERR_INVALID_STATE -4
-
 #define WL_INVALID_HANDLE -1
 
 typedef struct {
@@ -59,6 +53,11 @@ esp_err_t wl_write(wl_handle_t handle, size_t dest_addr, const void *src, size_t
 esp_err_t wl_read(wl_handle_t handle, size_t src_addr, void *dest, size_t size);
 size_t wl_size(wl_handle_t handle);
 size_t wl_sector_size(wl_handle_t handle);
+
+void wl_mock_reset_flash(void);
+void wl_mock_set_reset_on_mount(int reset);
+void wl_mock_set_save_snapshots(int save);
+esp_err_t wl_mock_overwrite(size_t addr, const void *src, size_t size);
 
 #ifdef __cplusplus
 }

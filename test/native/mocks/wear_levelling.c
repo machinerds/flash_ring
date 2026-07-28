@@ -9,8 +9,8 @@
 #include <sys/types.h>
 #include <dirent.h>
 
-#define VIRTUAL_FLASH_PATH "test/data/virtual_flash.bin"
-#define SNAPSHOTS_DIR "test/data/snapshots"
+#define VIRTUAL_FLASH_PATH "test/native/data/virtual_flash.bin"
+#define SNAPSHOTS_DIR "test/native/data/snapshots"
 
 static struct {
     int fd;
@@ -23,6 +23,7 @@ static struct {
 };
 
 static int save_snapshots = 1;
+static int reset_on_mount = 1;
 static int snapshot_index = 0;
 
 #include <sys/stat.h>
@@ -37,6 +38,8 @@ static int snapshot_index = 0;
 #include <errno.h>
 
 const esp_partition_t* esp_partition_find_first(int type, int subtype, const char* label) {
+    (void)type;
+    (void)subtype;
     static esp_partition_t mock_partition;
     static int initialized = 0;
     if (!initialized) {
@@ -47,7 +50,8 @@ const esp_partition_t* esp_partition_find_first(int type, int subtype, const cha
 }
 
 int ensure_dir_exists(const char *path) {
-    struct stat st = {0};
+    struct stat st;
+    memset(&st, 0, sizeof(st));
     int res = stat(path, &st);
     if (res == -1) {
         return mkdir(path, 0755);
@@ -67,6 +71,24 @@ void clear_dir(const char *path) {
         unlink(filepath);
     }
     closedir(dir);
+}
+
+static esp_err_t fill_flash_with_ff(void) {
+    size_t total_size = instance.sector_size * instance.sector_count;
+    if (ftruncate(instance.fd, total_size) != 0) return ESP_FAIL;
+
+    uint8_t *blank = (uint8_t* )malloc(instance.sector_size);
+    if (!blank) return ESP_ERR_NO_MEM;
+
+    memset(blank, 0xFF, instance.sector_size);
+    for (size_t i = 0; i < instance.sector_count; ++i) {
+        if (pwrite(instance.fd, blank, instance.sector_size, i * instance.sector_size) != (ssize_t)instance.sector_size) {
+            free(blank);
+            return ESP_FAIL;
+        }
+    }
+    free(blank);
+    return ESP_OK;
 }
 
 static void save_snapshot() {
@@ -96,30 +118,29 @@ static void save_snapshot() {
 esp_err_t wl_mount(const esp_partition_t *partition, wl_handle_t *out_handle) {
     if (!partition || !out_handle) return ESP_ERR_INVALID_ARG;
 
-    int e = ensure_dir_exists("test/data");
-    clear_dir("test/data");
+    if (ensure_dir_exists("test/native/data") != 0) return ESP_FAIL;
+    if (reset_on_mount) clear_dir("test/native/data");
 
     instance.fd = open(VIRTUAL_FLASH_PATH, O_RDWR | O_CREAT, 0666);
     if (instance.fd < 0) return ESP_FAIL;
 
     size_t total_size = instance.sector_size * instance.sector_count;
-    ftruncate(instance.fd, total_size);
-
-    // Initialize with 0xFF
-    uint8_t *blank = (uint8_t* )malloc(instance.sector_size);
-    memset(blank, 0xFF, instance.sector_size);
-    for (size_t i = 0; i < instance.sector_count; ++i)
-        pwrite(instance.fd, blank, instance.sector_size, i * instance.sector_size);
-    free(blank);
+    struct stat st;
+    if (fstat(instance.fd, &st) != 0) return ESP_FAIL;
+    if (reset_on_mount || st.st_size != (off_t)total_size) {
+        esp_err_t err = fill_flash_with_ff();
+        if (err != ESP_OK) return err;
+    }
 
     *out_handle = 0;
     
-    e = ensure_dir_exists(SNAPSHOTS_DIR);
-    clear_dir(SNAPSHOTS_DIR);
+    if (ensure_dir_exists(SNAPSHOTS_DIR) != 0) return ESP_FAIL;
+    if (reset_on_mount) clear_dir(SNAPSHOTS_DIR);
     return ESP_OK;
 }
 
 esp_err_t wl_unmount(wl_handle_t handle) {
+    (void)handle;
     if (instance.fd >= 0) close(instance.fd);
     instance.fd = -1;
     return ESP_OK;
@@ -188,9 +209,35 @@ esp_err_t wl_erase_range(wl_handle_t handle, size_t start_addr, size_t size) {
 }
 
 size_t wl_size(wl_handle_t handle) {
+    (void)handle;
     return instance.sector_size * instance.sector_count;
 }
 
 size_t wl_sector_size(wl_handle_t handle) {
+    (void)handle;
     return instance.sector_size;
+}
+
+void wl_mock_reset_flash(void) {
+    if (instance.fd >= 0) {
+        close(instance.fd);
+        instance.fd = -1;
+    }
+    clear_dir("test/native/data");
+    snapshot_index = 0;
+}
+
+void wl_mock_set_reset_on_mount(int reset) {
+    reset_on_mount = reset;
+}
+
+void wl_mock_set_save_snapshots(int save) {
+    save_snapshots = save;
+}
+
+esp_err_t wl_mock_overwrite(size_t addr, const void *src, size_t size) {
+    if (!src || addr + size > wl_size(0)) return ESP_ERR_INVALID_SIZE;
+    if (pwrite(instance.fd, src, size, addr) != (ssize_t)size) return ESP_FAIL;
+    fsync(instance.fd);
+    return ESP_OK;
 }
