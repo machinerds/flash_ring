@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 700
+
 #include "wear_levelling.h"
 #include <fcntl.h>
 #include <stdlib.h>
@@ -43,7 +45,7 @@ const esp_partition_t* esp_partition_find_first(int type, int subtype, const cha
     static esp_partition_t mock_partition;
     static int initialized = 0;
     if (!initialized) {
-        mock_partition.label = label ? strdup(label) : "mock_partition";
+        mock_partition.label = label ? label : "mock_partition";
         initialized = 1;
     }
     return &mock_partition;
