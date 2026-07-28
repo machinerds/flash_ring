@@ -2,6 +2,7 @@
 
 #include "esp_crc.h"
 
+#include <string.h>
 #include <cstdlib>
 
 #define MAGIC 0x5B15B1
@@ -14,14 +15,29 @@ bool is_all_ff(const void *ptr, size_t len) {
     return true;
 }
 
+struct cb_header_crc_data {
+    uint32_t magic;
+    size_t front;
+    uint32_t record_num;
+    uint32_t sequence;
+};
+
+uint32_t header_crc(const struct cb_header *hdr) {
+    struct cb_header_crc_data crc_data;
+    memset(&crc_data, 0, sizeof(crc_data));
+    crc_data.magic = hdr->magic;
+    crc_data.front = hdr->front;
+    crc_data.record_num = hdr->record_num;
+    crc_data.sequence = hdr->sequence;
+    return esp_crc32_le(0, (const uint8_t*)&crc_data, sizeof(crc_data));
+}
+
 void update_crc(struct cb_header *hdr) {
-    hdr->crc = 0;
-    hdr->crc = esp_crc32_le(0, (const uint8_t*)hdr, sizeof(struct cb_header) - sizeof(uint32_t));
+    hdr->crc = header_crc(hdr);
 }
 
 bool check_header(const struct cb_header *hdr) {
-    uint32_t crc = esp_crc32_le(0, (const uint8_t*)hdr, sizeof(struct cb_header) - sizeof(uint32_t));
-    return crc == hdr->crc && hdr->magic == MAGIC;
+    return header_crc(hdr) == hdr->crc && hdr->magic == MAGIC;
 }
 
 size_t CircularBuffer::secs_for_one_header() {
@@ -37,6 +53,7 @@ size_t CircularBuffer::header_offset() { return secs_for_header() * wl_sector_si
 
 esp_err_t CircularBuffer::write_header() {
     cb_header header;
+    memset(&header, 0, sizeof(header));
     header.magic = MAGIC;
     header.front = front;
     header.record_num = record_num;
