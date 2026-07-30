@@ -1,4 +1,5 @@
 #include "circular_buffer.h"
+#include "wear_levelling.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #define CHECK_EQ(actual, expected) check_eq((size_t)(actual), (size_t)(expected), #actual, #expected, __LINE__)
 
 static const size_t SECTOR_SIZE = 4096;
+static wl_handle_t wl_handle = WL_INVALID_HANDLE;
 
 static void fail(const char *message, int line) {
     fprintf(stderr, "FAIL line %d: %s\n", line, message);
@@ -53,6 +55,42 @@ static uint32_t read_record_id(const uint8_t *record) {
     return value;
 }
 
+static esp_err_t storage_read(void *ctx, size_t src_addr, void *dest, size_t size) {
+    return wl_read(*(wl_handle_t *)ctx, src_addr, dest, size);
+}
+
+static esp_err_t storage_erase_range(void *ctx, size_t start_addr, size_t size) {
+    return wl_erase_range(*(wl_handle_t *)ctx, start_addr, size);
+}
+
+static esp_err_t storage_write(void *ctx, size_t dest_addr, const void *src, size_t size) {
+    return wl_write(*(wl_handle_t *)ctx, dest_addr, src, size);
+}
+
+static void mount_mock_storage(void) {
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA,
+        ESP_PARTITION_SUBTYPE_ANY,
+        "mock"
+    );
+
+    CHECK_TRUE(partition != NULL);
+    CHECK_OK(wl_mount(partition, &wl_handle));
+}
+
+static esp_err_t init_mock_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
+    return circular_buffer_init(cb,
+                                wl_sector_size(wl_handle),
+                                storage_read,
+                                storage_erase_range,
+                                storage_write,
+                                wl_size(wl_handle),
+                                &wl_handle,
+                                record_size,
+                                overwrite,
+                                recovery_mode);
+}
+
 static int all_ff(const uint8_t *record, size_t record_size) {
     size_t i;
 
@@ -65,7 +103,8 @@ static int all_ff(const uint8_t *record, size_t record_size) {
 static void fresh_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
     wl_mock_set_reset_on_mount(1);
     wl_mock_reset_flash();
-    CHECK_OK(circular_buffer_init(cb, (char *)"mock", record_size, overwrite, recovery_mode));
+    mount_mock_storage();
+    CHECK_OK(init_mock_buffer(cb, record_size, overwrite, recovery_mode));
     wl_mock_set_reset_on_mount(0);
 }
 
@@ -195,7 +234,8 @@ static void test_remount_preserves_header_and_records(void) {
     }
     CHECK_OK(wl_unmount(0));
 
-    CHECK_OK(circular_buffer_init(&cb, (char *)"mock", record_size, 1, 0));
+    mount_mock_storage();
+    CHECK_OK(init_mock_buffer(&cb, record_size, 1, 0));
     CHECK_EQ(circular_buffer_get_record_num(&cb), 5);
 
     for (expected = 203; expected < 208; ++expected) {
@@ -225,7 +265,8 @@ static void test_recovery_mode_revives_record_after_latest_header_corruption(voi
     CHECK_OK(wl_mock_overwrite(SECTOR_SIZE, corrupt, sizeof(corrupt)));
     CHECK_OK(wl_unmount(0));
 
-    CHECK_OK(circular_buffer_init(&cb, (char *)"mock", record_size, 1, 1));
+    mount_mock_storage();
+    CHECK_OK(init_mock_buffer(&cb, record_size, 1, 1));
     CHECK_EQ(circular_buffer_get_record_num(&cb), 3);
 
     for (expected = 300; expected < 303; ++expected) {

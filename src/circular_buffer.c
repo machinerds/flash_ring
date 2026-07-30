@@ -23,10 +23,10 @@ struct cb_header_crc_data {
     uint32_t sequence;
 };
 
-static size_t records_in_sec(CircularBuffer *cb) { return wl_sector_size(cb->wl_handle) / cb->record_size; }
+static size_t records_in_sec(CircularBuffer *cb) { return cb->sector_size / cb->record_size; }
 
 static size_t secs_for_one_header(CircularBuffer *cb) {
-    size_t sec_size = wl_sector_size(cb->wl_handle);
+    size_t sec_size = cb->sector_size;
     return (sizeof(struct cb_header) + sec_size - 1) / sec_size;
 }
 
@@ -34,9 +34,9 @@ static size_t secs_for_header(CircularBuffer *cb) {
     return 2 * secs_for_one_header(cb);
 }
 
-static uint32_t sec_num(CircularBuffer *cb) { return wl_size(cb->wl_handle) / wl_sector_size(cb->wl_handle) - secs_for_header(cb); }
+static uint32_t sec_num(CircularBuffer *cb) { return cb->total_size / cb->sector_size - secs_for_header(cb); }
 
-static size_t header_offset(CircularBuffer *cb) { return secs_for_header(cb) * wl_sector_size(cb->wl_handle); }
+static size_t header_offset(CircularBuffer *cb) { return secs_for_header(cb) * cb->sector_size; }
 
 /**
  * @return Capacity of the circular buffer
@@ -45,7 +45,7 @@ static size_t header_offset(CircularBuffer *cb) { return secs_for_header(cb) * w
 size_t circular_buffer_get_max_records(CircularBuffer *cb) { return sec_num(cb) * records_in_sec(cb); }
 
 static size_t get_back(CircularBuffer *cb) {
-    size_t sec_size = wl_sector_size(cb->wl_handle);
+    size_t sec_size = cb->sector_size;
     uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
     if (remaining_capacity_in_front_sector > cb->record_num) { return cb->front + (cb->record_num * cb->record_size); }
     else {
@@ -93,45 +93,60 @@ static esp_err_t write_header(CircularBuffer *cb) {
     header.record_num = cb->record_num;
     header.sequence = ++cb->sequence;
     update_crc(&header);
-    size_t addr = (cb->sequence % 2) * secs_for_one_header(cb) * wl_sector_size(cb->wl_handle);
-    esp_err_t err = wl_erase_range(cb->wl_handle, addr, secs_for_one_header(cb) * wl_sector_size(cb->wl_handle));
+    size_t addr = (cb->sequence % 2) * secs_for_one_header(cb) * cb->sector_size;
+    esp_err_t err = cb->erase_range(cb->storage_ctx, addr, secs_for_one_header(cb) * cb->sector_size);
     if (err != ESP_OK) { return err; }
-    return wl_write(cb->wl_handle, addr, &header, sizeof(header));
+    return cb->write(cb->storage_ctx, addr, &header, sizeof(header));
 }
 
 /**
  * Initializes circular buffer
- * @param partition_name name of partition in which circular buffer is going to be initialized
+ * @param sector_size erase sector size of the storage backend
+ * @param read reads bytes from the storage backend
+ * @param erase_range erases a sector-aligned range in the storage backend
+ * @param write writes bytes to the storage backend
+ * @param total_size total size of the storage backend
+ * @param storage_ctx user-owned context passed to read, erase_range, and write
  * @param record_size  size of every record in circular buffer
  * @param overwrite whether overwrite feature should be turned on
  * @param recovery_mode use backup header if header was correupted (this may cause in at most one corrupted record)
  * @return ESP_OK if ok
  */
-esp_err_t circular_buffer_init(CircularBuffer *cb, char *partition_name, size_t record_size, int overwrite, int recovery_mode) {
-    const esp_partition_t *partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA,
-        ESP_PARTITION_SUBTYPE_ANY,
-        partition_name
-    );
+esp_err_t circular_buffer_init(CircularBuffer *cb,
+                               size_t sector_size,
+                               circular_buffer_read_fn read,
+                               circular_buffer_erase_range_fn erase_range,
+                               circular_buffer_write_fn write,
+                               size_t total_size,
+                               void *storage_ctx,
+                               size_t record_size,
+                               int overwrite,
+                               int recovery_mode) {
+    esp_err_t err;
+    size_t sec_size = sector_size;
 
-    if (partition == NULL) { return ESP_ERR_NOT_FOUND; }
+    if (cb == NULL || read == NULL || erase_range == NULL || write == NULL) { return ESP_ERR_INVALID_ARG; }
+    if (sector_size == 0 || total_size == 0 || record_size == 0) { return ESP_ERR_INVALID_SIZE; }
+    if (total_size % sector_size != 0) { return ESP_ERR_INVALID_SIZE; }
+    if (record_size > sector_size) { return ESP_ERR_INVALID_SIZE; }
 
-    esp_err_t err = wl_mount(partition, &cb->wl_handle);
-    if (err != ESP_OK) { return err; }
-
-    size_t sec_size = wl_sector_size(cb->wl_handle);
-
-    if (record_size > sec_size) { return ESP_ERR_INVALID_SIZE; }
-
+    cb->sector_size = sector_size;
+    cb->total_size = total_size;
+    cb->storage_ctx = storage_ctx;
+    cb->read = read;
+    cb->erase_range = erase_range;
+    cb->write = write;
     cb->record_size = record_size;
     cb->overwrite = overwrite;
 
+    if (sec_num(cb) == 0 || records_in_sec(cb) == 0) { return ESP_ERR_INVALID_SIZE; }
+
     cb_header header1;
-    err = wl_read(cb->wl_handle, 0, &header1, sizeof(cb_header));
+    err = cb->read(cb->storage_ctx, 0, &header1, sizeof(cb_header));
     if (err != ESP_OK) { return err; }
 
     cb_header header2;
-    err = wl_read(cb->wl_handle, secs_for_one_header(cb) * sec_size, &header2, sizeof(cb_header));
+    err = cb->read(cb->storage_ctx, secs_for_one_header(cb) * sec_size, &header2, sizeof(cb_header));
     if (err != ESP_OK) { return err; }
 
     bool header1_valid = check_header(&header1);
@@ -160,7 +175,7 @@ esp_err_t circular_buffer_init(CircularBuffer *cb, char *partition_name, size_t 
         size_t back = get_back(cb);
         if (back % sec_size != 0) {
             void* next = malloc(record_size);
-            wl_read(cb->wl_handle, header_offset(cb) + back, next, record_size);
+            cb->read(cb->storage_ctx, header_offset(cb) + back, next, record_size);
             if (!is_all_ff(next, record_size)) {
                 ++cb->record_num;
                 write_header(cb);
@@ -183,7 +198,7 @@ esp_err_t circular_buffer_init(CircularBuffer *cb, char *partition_name, size_t 
  * @return ESP_OK if ok
  */
 esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
-    size_t sec_size = wl_sector_size(cb->wl_handle);
+    size_t sec_size = cb->sector_size;
     size_t back;
     uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
     if (remaining_capacity_in_front_sector > cb->record_num) { back = cb->front + (cb->record_num * cb->record_size); }
@@ -202,8 +217,8 @@ esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
         size_t back_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
         back = back_sec * sec_size + back_offset_in_sec;
     }
-    if (back % sec_size == 0) { wl_erase_range(cb->wl_handle, back + header_offset(cb), sec_size); }
-    esp_err_t err = wl_write(cb->wl_handle, back + header_offset(cb), src, cb->record_size);
+    if (back % sec_size == 0) { cb->erase_range(cb->storage_ctx, back + header_offset(cb), sec_size); }
+    esp_err_t err = cb->write(cb->storage_ctx, back + header_offset(cb), src, cb->record_size);
     if (err != ESP_OK) { return err; }
     cb->record_num++;
     return write_header(cb);
@@ -216,7 +231,7 @@ esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
  */
 esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest) {
     if (cb->record_num == 0) { return ESP_ERR_NOT_FOUND; }
-    return wl_read(cb->wl_handle, cb->front + header_offset(cb), dest, cb->record_size);
+    return cb->read(cb->storage_ctx, cb->front + header_offset(cb), dest, cb->record_size);
 }
 
 /**
@@ -241,7 +256,7 @@ uint32_t circular_buffer_get_record_num(CircularBuffer *cb) { return cb->record_
  */
 esp_err_t circular_buffer_delete_front(CircularBuffer *cb) {
     if (cb->record_num == 0) { return ESP_ERR_NOT_FOUND; }
-    size_t sec_size = wl_sector_size(cb->wl_handle);
+    size_t sec_size = cb->sector_size;
     if (sec_size - (cb->front % sec_size) >= 2 * cb->record_size) { cb->front += cb->record_size; }
     else { cb->front = ((cb->front / sec_size) + 1) % sec_num(cb) * sec_size; }
     cb->record_num--;

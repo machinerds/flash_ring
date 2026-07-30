@@ -1,22 +1,43 @@
 #ifndef CIRCULAR_BUFFER_H
 #define CIRCULAR_BUFFER_H
 
-#include "wear_levelling.h"
+#include "esp_err.h"
+
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+typedef esp_err_t (*circular_buffer_read_fn)(void *ctx, size_t src_addr, void *dest, size_t size);
+typedef esp_err_t (*circular_buffer_erase_range_fn)(void *ctx, size_t start_addr, size_t size);
+typedef esp_err_t (*circular_buffer_write_fn)(void *ctx, size_t dest_addr, const void *src, size_t size);
+
 typedef struct {
     size_t front;
     size_t record_size;
     size_t record_num;
+    size_t sector_size;
+    size_t total_size;
     uint32_t sequence;
-    wl_handle_t wl_handle;
+    void *storage_ctx;
+    circular_buffer_read_fn read;
+    circular_buffer_erase_range_fn erase_range;
+    circular_buffer_write_fn write;
     int overwrite;
 } CircularBuffer;
 
-esp_err_t circular_buffer_init(CircularBuffer *cb, char *partition_name, size_t record_size, int overwrite, int recovery_mode);
+esp_err_t circular_buffer_init(CircularBuffer *cb,
+                               size_t sector_size,
+                               circular_buffer_read_fn read,
+                               circular_buffer_erase_range_fn erase_range,
+                               circular_buffer_write_fn write,
+                               size_t total_size,
+                               void *storage_ctx,
+                               size_t record_size,
+                               int overwrite,
+                               int recovery_mode);
 esp_err_t circular_buffer_push_back(CircularBuffer *cb, void *src);
 esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void *dest);
 esp_err_t circular_buffer_pop_front(CircularBuffer *cb, void *dest);
