@@ -1,7 +1,5 @@
 #include "circular_buffer.h"
 
-#include "esp_crc.h"
-
 #include <stdbool.h>
 #include <string.h>
 
@@ -81,6 +79,20 @@ static bool is_record_flag_set(uint8_t commit, size_t flag) {
     return (commit & flag_mask(flag)) != 0;
 }
 
+static uint32_t crc32_le(uint32_t crc, const uint8_t *buf, size_t len) {
+    size_t i;
+
+    crc = ~crc;
+    for (i = 0; i < len; ++i) {
+        uint8_t bit;
+        crc ^= buf[i];
+        for (bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)-(int32_t)(crc & 1u));
+        }
+    }
+    return ~crc;
+}
+
 static circular_buffer_err_t read_record_commit_raw(CircularBuffer *cb, size_t index, uint8_t *commit) {
     size_t addr = get_record_addr(cb, index);
     return cb->read(cb->storage_ctx, addr + header_offset(cb) + cb->record_size, commit, sizeof(*commit));
@@ -150,7 +162,7 @@ static uint32_t header_crc(const cb_header *hdr) {
     crc_data.front = hdr->front;
     crc_data.record_num = hdr->record_num;
     crc_data.sequence = hdr->sequence;
-    return esp_crc32_le(0, (const uint8_t*)&crc_data, sizeof(crc_data));
+    return crc32_le(0, (const uint8_t*)&crc_data, sizeof(crc_data));
 }
 
 static void update_crc(cb_header *hdr) {

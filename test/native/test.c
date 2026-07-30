@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_crc.h"
-
 #define CHECK_OK(expr) check_ok((expr), #expr, __LINE__)
 #define CHECK_TRUE(expr) check_true((expr), #expr, __LINE__)
 #define CHECK_EQ(actual, expected) check_eq((size_t)(actual), (size_t)(expected), #actual, #expected, __LINE__)
@@ -512,7 +510,6 @@ static void test_randomized_against_model(void) {
 }
 
 int main(void) {
-    crc32_init();
     wl_mock_set_save_snapshots(0);
 
     test_delete_front_keeps_last_record_in_sector();
