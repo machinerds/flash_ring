@@ -8,6 +8,11 @@
 extern "C" {
 #endif
 
+#define CIRCULAR_BUFFER_USER_DEFINED_FLAG_1 0
+#define CIRCULAR_BUFFER_USER_DEFINED_FLAG_2 1
+#define CIRCULAR_BUFFER_USER_DEFINED_FLAG_3 2
+#define CIRCULAR_BUFFER_USER_DEFINED_FLAG_4 3
+
 typedef enum {
     CIRCULAR_BUFFER_OK = 0,
     CIRCULAR_BUFFER_FAIL = -1,
@@ -34,6 +39,7 @@ typedef struct {
     circular_buffer_erase_range_fn erase_range;
     circular_buffer_write_fn write;
     int overwrite;
+    size_t first_flagged_record[4];
 } CircularBuffer;
 
 circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
@@ -48,9 +54,11 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
                                            int recovery_mode);
 circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void *src);
 circular_buffer_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void *dest);
+circular_buffer_err_t circular_buffer_peek_flagged(CircularBuffer *cb, size_t index, size_t flag, void *dest, size_t *record_index);
 circular_buffer_err_t circular_buffer_peek_front(CircularBuffer *cb, void *dest);
 circular_buffer_err_t circular_buffer_pop_front(CircularBuffer *cb, void *dest);
 circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb);
+circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t index, size_t flag);
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb);
 size_t circular_buffer_get_max_records(CircularBuffer *cb);
 
