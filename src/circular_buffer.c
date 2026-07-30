@@ -44,18 +44,22 @@ static size_t header_offset(CircularBuffer *cb) { return secs_for_header(cb) * c
 
 size_t circular_buffer_get_max_records(CircularBuffer *cb) { return sec_num(cb) * records_in_sec(cb); }
 
-static size_t get_back(CircularBuffer *cb) {
+static size_t get_record_addr(CircularBuffer *cb, size_t index) {
     size_t sec_size = cb->sector_size;
     uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
-    if (remaining_capacity_in_front_sector > cb->record_num) { return cb->front + (cb->record_num * cb->record_size); }
+    if (remaining_capacity_in_front_sector > index) { return cb->front + (index * cb->record_size); }
     else {
-        uint32_t remaining_records = cb->record_num - remaining_capacity_in_front_sector;
+        uint32_t remaining_records = index - remaining_capacity_in_front_sector;
         uint32_t full_secs = remaining_records / records_in_sec(cb);
         uint32_t front_sec = cb->front / sec_size;
-        uint32_t back_sec = (front_sec + full_secs + 1) % sec_num(cb);
-        size_t back_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
-        return back_sec * sec_size + back_offset_in_sec;
+        uint32_t record_sec = (front_sec + full_secs + 1) % sec_num(cb);
+        size_t record_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
+        return record_sec * sec_size + record_offset_in_sec;
     }
+}
+
+static size_t get_back(CircularBuffer *cb) {
+    return get_record_addr(cb, cb->record_num);
 }
 
 static bool is_all_ff(const void *ptr, size_t len) {
@@ -245,9 +249,22 @@ esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
  * @return ESP_OK if ok
  */
 esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest) {
+    return circular_buffer_peek_at(cb, 0, dest);
+}
+
+/**
+ * Retrieves data from the circular buffer without deleting it
+ * @param index record index from the front
+ * @param dest destination of data
+ * @return ESP_OK if ok
+ */
+esp_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void* dest) {
+    size_t addr;
+
     if (cb == NULL || dest == NULL) { return ESP_ERR_INVALID_ARG; }
-    if (cb->record_num == 0) { return ESP_ERR_NOT_FOUND; }
-    return cb->read(cb->storage_ctx, cb->front + header_offset(cb), dest, cb->record_size);
+    if (index >= cb->record_num) { return ESP_ERR_NOT_FOUND; }
+    addr = get_record_addr(cb, index);
+    return cb->read(cb->storage_ctx, addr + header_offset(cb), dest, cb->record_size);
 }
 
 /**

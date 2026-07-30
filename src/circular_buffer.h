@@ -39,6 +39,7 @@ esp_err_t circular_buffer_init(CircularBuffer *cb,
                                int overwrite,
                                int recovery_mode);
 esp_err_t circular_buffer_push_back(CircularBuffer *cb, void *src);
+esp_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void *dest);
 esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void *dest);
 esp_err_t circular_buffer_pop_front(CircularBuffer *cb, void *dest);
 esp_err_t circular_buffer_delete_front(CircularBuffer *cb);

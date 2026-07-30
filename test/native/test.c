@@ -161,6 +161,38 @@ static void test_delete_front_crosses_partial_sector(void) {
     CHECK_OK(wl_unmount(0));
 }
 
+static void test_peek_at_reads_index_without_deleting(void) {
+    const size_t record_size = 1500;
+    CircularBuffer cb;
+    uint8_t input[1500];
+    uint8_t output[1500];
+    uint32_t i;
+
+    fresh_buffer(&cb, record_size, 1, 0);
+
+    for (i = 0; i < 5; ++i) {
+        fill_record(input, record_size, i + 10);
+        CHECK_OK(circular_buffer_push_back(&cb, input));
+    }
+
+    CHECK_OK(circular_buffer_delete_front(&cb));
+
+    for (i = 0; i < 4; ++i) {
+        CHECK_OK(circular_buffer_peek_at(&cb, i, output));
+        CHECK_TRUE(!all_ff(output, record_size));
+        CHECK_EQ(read_record_id(output), i + 11);
+    }
+
+    CHECK_EQ(circular_buffer_peek_at(&cb, 4, output), ESP_ERR_NOT_FOUND);
+    CHECK_EQ(circular_buffer_peek_at(NULL, 0, output), ESP_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_peek_at(&cb, 0, NULL), ESP_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_get_record_num(&cb), 4);
+
+    CHECK_OK(circular_buffer_pop_front(&cb, output));
+    CHECK_EQ(read_record_id(output), 11);
+    CHECK_OK(wl_unmount(0));
+}
+
 static void test_overwrite_wraps_without_ff_records(void) {
     const size_t record_size = SECTOR_SIZE / 4;
     CircularBuffer cb;
@@ -408,6 +440,7 @@ int main(void) {
 
     test_delete_front_keeps_last_record_in_sector();
     test_delete_front_crosses_partial_sector();
+    test_peek_at_reads_index_without_deleting();
     test_overwrite_wraps_without_ff_records();
     test_no_overwrite_reports_full_and_preserves_data();
     test_remount_preserves_header_and_records();
