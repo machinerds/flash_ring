@@ -38,9 +38,19 @@ static size_t secs_for_header(CircularBuffer *cb) {
     return 2 * secs_for_one_header(cb);
 }
 
-static uint32_t sec_num(CircularBuffer *cb) { return cb->total_size / cb->sector_size - secs_for_header(cb); }
+static size_t total_sectors(CircularBuffer *cb) { return cb->total_size / cb->sector_size; }
 
-static size_t header_offset(CircularBuffer *cb) { return secs_for_header(cb) * cb->sector_size; }
+static size_t sec_num(CircularBuffer *cb) {
+    return total_sectors(cb) - cb->user_header_sectors - secs_for_header(cb);
+}
+
+static size_t user_header_size(CircularBuffer *cb) { return cb->user_header_sectors * cb->sector_size; }
+
+static size_t internal_header_offset(CircularBuffer *cb) { return user_header_size(cb); }
+
+static size_t records_offset(CircularBuffer *cb) {
+    return internal_header_offset(cb) + secs_for_header(cb) * cb->sector_size;
+}
 
 /**
  * @return Capacity of the circular buffer
@@ -95,7 +105,7 @@ static uint32_t crc32_le(uint32_t crc, const uint8_t *buf, size_t len) {
 
 static circular_buffer_err_t read_record_commit_raw(CircularBuffer *cb, size_t index, uint8_t *commit) {
     size_t addr = get_record_addr(cb, index);
-    return cb->read(cb->storage_ctx, addr + header_offset(cb) + cb->record_size, commit, sizeof(*commit));
+    return cb->read(cb->storage_ctx, addr + records_offset(cb) + cb->record_size, commit, sizeof(*commit));
 }
 
 static circular_buffer_err_t read_record_commit(CircularBuffer *cb, size_t index, uint8_t *commit) {
@@ -107,7 +117,7 @@ static circular_buffer_err_t read_record_commit(CircularBuffer *cb, size_t index
 
 static circular_buffer_err_t write_record_commit(CircularBuffer *cb, size_t index, uint8_t commit) {
     size_t addr = get_record_addr(cb, index);
-    return cb->write(cb->storage_ctx, addr + header_offset(cb) + cb->record_size, &commit, sizeof(commit));
+    return cb->write(cb->storage_ctx, addr + records_offset(cb) + cb->record_size, &commit, sizeof(commit));
 }
 
 static void clear_first_flagged_records(CircularBuffer *cb) {
@@ -181,7 +191,7 @@ static circular_buffer_err_t write_header(CircularBuffer *cb) {
     header.record_num = cb->record_num;
     header.sequence = ++cb->sequence;
     update_crc(&header);
-    size_t addr = (cb->sequence % 2) * secs_for_one_header(cb) * cb->sector_size;
+    size_t addr = internal_header_offset(cb) + (cb->sequence % 2) * secs_for_one_header(cb) * cb->sector_size;
     circular_buffer_err_t err = cb->erase_range(cb->storage_ctx, addr, secs_for_one_header(cb) * cb->sector_size);
     if (err != CIRCULAR_BUFFER_OK) { return err; }
     return cb->write(cb->storage_ctx, addr, &header, sizeof(header));
@@ -195,6 +205,7 @@ static circular_buffer_err_t write_header(CircularBuffer *cb) {
  * @param write writes bytes to the storage backend
  * @param total_size total size of the storage backend
  * @param storage_ctx user-owned context passed to read, erase_range, and write
+ * @param user_header_sectors number of erase sectors reserved at the beginning of storage for caller data
  * @param record_size  size of every record in circular buffer
  * @param overwrite whether overwrite feature should be turned on
  * @param recovery_mode use backup header if header was correupted (this may cause in at most one corrupted record)
@@ -207,11 +218,13 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
                                circular_buffer_write_fn write,
                                size_t total_size,
                                void *storage_ctx,
+                               size_t user_header_sectors,
                                size_t record_size,
                                int overwrite,
                                int recovery_mode) {
     circular_buffer_err_t err = CIRCULAR_BUFFER_OK;
     size_t sec_size = sector_size;
+    size_t sector_count;
 
     if (cb == NULL || read == NULL || erase_range == NULL || write == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (sector_size == 0 || total_size == 0 || record_size == 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
@@ -220,6 +233,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
 
     cb->sector_size = sector_size;
     cb->total_size = total_size;
+    cb->user_header_sectors = user_header_sectors;
     cb->storage_ctx = storage_ctx;
     cb->read = read;
     cb->erase_range = erase_range;
@@ -228,14 +242,20 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
     cb->overwrite = overwrite;
     clear_first_flagged_records(cb);
 
+    sector_count = total_sectors(cb);
+    if (user_header_sectors >= sector_count) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (sector_count - user_header_sectors <= secs_for_header(cb)) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
     if (sec_num(cb) == 0 || records_in_sec(cb) == 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
 
     cb_header header1;
-    err = cb->read(cb->storage_ctx, 0, &header1, sizeof(cb_header));
+    err = cb->read(cb->storage_ctx, internal_header_offset(cb), &header1, sizeof(cb_header));
     if (err != CIRCULAR_BUFFER_OK) { return err; }
 
     cb_header header2;
-    err = cb->read(cb->storage_ctx, secs_for_one_header(cb) * sec_size, &header2, sizeof(cb_header));
+    err = cb->read(cb->storage_ctx,
+                   internal_header_offset(cb) + secs_for_one_header(cb) * sec_size,
+                   &header2,
+                   sizeof(cb_header));
     if (err != CIRCULAR_BUFFER_OK) { return err; }
 
     bool header1_valid = check_header(&header1);
@@ -264,7 +284,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
         size_t back = get_back(cb);
         if (back % sec_size != 0) {
             uint8_t commit;
-            err = cb->read(cb->storage_ctx, header_offset(cb) + back + cb->record_size, &commit, sizeof(commit));
+            err = cb->read(cb->storage_ctx, records_offset(cb) + back + cb->record_size, &commit, sizeof(commit));
             if (err != CIRCULAR_BUFFER_OK) { return err; }
             if (is_record_committed(commit)) {
                 ++cb->record_num;
@@ -282,6 +302,32 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
 
     if (cb->record_num != 0) { err = init_first_flagged_records(cb); }
     return err;
+}
+
+circular_buffer_err_t circular_buffer_read_user_header(CircularBuffer *cb, void *dest, size_t size) {
+    if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (dest == NULL && size != 0) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (size > user_header_size(cb)) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (size == 0) { return CIRCULAR_BUFFER_OK; }
+
+    return cb->read(cb->storage_ctx, 0, dest, size);
+}
+
+circular_buffer_err_t circular_buffer_write_user_header(CircularBuffer *cb, const void *src, size_t size) {
+    circular_buffer_err_t err;
+    size_t reserved_size;
+
+    if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (src == NULL && size != 0) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    reserved_size = user_header_size(cb);
+    if (size > reserved_size) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (reserved_size == 0) { return CIRCULAR_BUFFER_OK; }
+
+    err = cb->erase_range(cb->storage_ctx, 0, reserved_size);
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
+    if (size == 0) { return CIRCULAR_BUFFER_OK; }
+
+    return cb->write(cb->storage_ctx, 0, src, size);
 }
 
 /**
@@ -320,12 +366,12 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
         back = back_sec * sec_size + back_offset_in_sec;
     }
     if (back % sec_size == 0) {
-        err = cb->erase_range(cb->storage_ctx, back + header_offset(cb), sec_size);
+        err = cb->erase_range(cb->storage_ctx, back + records_offset(cb), sec_size);
         if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
-    err = cb->write(cb->storage_ctx, back + header_offset(cb), src, cb->record_size);
+    err = cb->write(cb->storage_ctx, back + records_offset(cb), src, cb->record_size);
     if (err != CIRCULAR_BUFFER_OK) { return err; }
-    err = cb->write(cb->storage_ctx, back + header_offset(cb) + cb->record_size, &commit, sizeof(commit));
+    err = cb->write(cb->storage_ctx, back + records_offset(cb) + cb->record_size, &commit, sizeof(commit));
     if (err != CIRCULAR_BUFFER_OK) { return err; }
     cb->record_num++;
     err = write_header(cb);
@@ -373,10 +419,10 @@ circular_buffer_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, 
     if (cb == NULL || dest == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (index >= cb->record_num) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
     addr = get_record_addr(cb, index);
-    err = cb->read(cb->storage_ctx, addr + header_offset(cb) + cb->record_size, &commit, sizeof(commit));
+    err = cb->read(cb->storage_ctx, addr + records_offset(cb) + cb->record_size, &commit, sizeof(commit));
     if (err != CIRCULAR_BUFFER_OK) { return err; }
     if (!is_record_committed(commit)) { return CIRCULAR_BUFFER_ERR_INVALID_RECORD; }
-    return cb->read(cb->storage_ctx, addr + header_offset(cb), dest, cb->record_size);
+    return cb->read(cb->storage_ctx, addr + records_offset(cb), dest, cb->record_size);
 }
 
 /**
@@ -425,6 +471,10 @@ circular_buffer_err_t circular_buffer_pop_front(CircularBuffer *cb, void* dest) 
  * @return Number of records currently in the circular buffer
  */
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb) { return cb->record_num; }
+
+size_t circular_buffer_get_user_header_sectors(CircularBuffer *cb) { return cb->user_header_sectors; }
+
+size_t circular_buffer_get_user_header_size(CircularBuffer *cb) { return user_header_size(cb); }
 
 /**
  * Deletes one record from the front of the circular buffer

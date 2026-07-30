@@ -33,6 +33,7 @@ typedef struct {
     size_t record_num;
     size_t sector_size;
     size_t total_size;
+    size_t user_header_sectors;
     uint32_t sequence;
     void *storage_ctx;
     circular_buffer_read_fn read;
@@ -49,9 +50,12 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
                                            circular_buffer_write_fn write,
                                            size_t total_size,
                                            void *storage_ctx,
+                                           size_t user_header_sectors,
                                            size_t record_size,
                                            int overwrite,
                                            int recovery_mode);
+circular_buffer_err_t circular_buffer_read_user_header(CircularBuffer *cb, void *dest, size_t size);
+circular_buffer_err_t circular_buffer_write_user_header(CircularBuffer *cb, const void *src, size_t size);
 circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void *src);
 circular_buffer_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void *dest);
 circular_buffer_err_t circular_buffer_peek_flagged(CircularBuffer *cb, size_t index, size_t flag, void *dest, size_t *record_index);
@@ -61,6 +65,8 @@ circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb);
 circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t index, size_t flag);
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb);
 size_t circular_buffer_get_max_records(CircularBuffer *cb);
+size_t circular_buffer_get_user_header_sectors(CircularBuffer *cb);
+size_t circular_buffer_get_user_header_size(CircularBuffer *cb);
 
 #ifdef __cplusplus
 }

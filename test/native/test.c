@@ -88,7 +88,11 @@ static void mount_mock_storage(void) {
     CHECK_OK(wl_mount(partition, &wl_handle));
 }
 
-static circular_buffer_err_t init_mock_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
+static circular_buffer_err_t init_mock_buffer_with_user_header(CircularBuffer *cb,
+                                                               size_t user_header_sectors,
+                                                               size_t record_size,
+                                                               int overwrite,
+                                                               int recovery_mode) {
     return circular_buffer_init(cb,
                                 wl_sector_size(wl_handle),
                                 storage_read,
@@ -96,9 +100,14 @@ static circular_buffer_err_t init_mock_buffer(CircularBuffer *cb, size_t record_
                                 storage_write,
                                 wl_size(wl_handle),
                                 &wl_handle,
+                                user_header_sectors,
                                 record_size,
                                 overwrite,
                                 recovery_mode);
+}
+
+static circular_buffer_err_t init_mock_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
+    return init_mock_buffer_with_user_header(cb, 0, record_size, overwrite, recovery_mode);
 }
 
 static int all_ff(const uint8_t *record, size_t record_size) {
@@ -115,6 +124,18 @@ static void fresh_buffer(CircularBuffer *cb, size_t record_size, int overwrite, 
     wl_mock_reset_flash();
     mount_mock_storage();
     CHECK_OK(init_mock_buffer(cb, record_size, overwrite, recovery_mode));
+    wl_mock_set_reset_on_mount(0);
+}
+
+static void fresh_buffer_with_user_header(CircularBuffer *cb,
+                                          size_t user_header_sectors,
+                                          size_t record_size,
+                                          int overwrite,
+                                          int recovery_mode) {
+    wl_mock_set_reset_on_mount(1);
+    wl_mock_reset_flash();
+    mount_mock_storage();
+    CHECK_OK(init_mock_buffer_with_user_header(cb, user_header_sectors, record_size, overwrite, recovery_mode));
     wl_mock_set_reset_on_mount(0);
 }
 
@@ -353,6 +374,101 @@ static void test_remount_preserves_header_and_records(void) {
     CHECK_OK(wl_unmount(0));
 }
 
+static void test_user_header_read_write_and_remount(void) {
+    const size_t record_size = 64;
+    const char notes[] = "device notes v1";
+    const char updated_notes[] = "updated notes";
+    CircularBuffer cb;
+    uint8_t input[64];
+    uint8_t output[64];
+    uint8_t readback[sizeof(notes)];
+    uint8_t full_header[SECTOR_SIZE * 2];
+    uint32_t i;
+
+    fresh_buffer_with_user_header(&cb, 2, record_size, 1, 0);
+    CHECK_EQ(circular_buffer_get_user_header_sectors(&cb), 2);
+    CHECK_EQ(circular_buffer_get_user_header_size(&cb), 2 * SECTOR_SIZE);
+
+    CHECK_OK(circular_buffer_write_user_header(&cb, notes, sizeof(notes)));
+    CHECK_OK(circular_buffer_read_user_header(&cb, readback, sizeof(readback)));
+    CHECK_TRUE(memcmp(readback, notes, sizeof(notes)) == 0);
+
+    CHECK_OK(circular_buffer_read_user_header(&cb, full_header, sizeof(full_header)));
+    for (i = sizeof(notes); i < sizeof(full_header); ++i) {
+        CHECK_EQ(full_header[i], 0xFF);
+    }
+
+    for (i = 0; i < 3; ++i) {
+        fill_record(input, record_size, i + 900);
+        CHECK_OK(circular_buffer_push_back(&cb, input));
+    }
+
+    CHECK_OK(circular_buffer_write_user_header(&cb, updated_notes, sizeof(updated_notes)));
+    CHECK_EQ(circular_buffer_get_record_num(&cb), 3);
+    for (i = 0; i < 3; ++i) {
+        CHECK_OK(circular_buffer_peek_at(&cb, i, output));
+        CHECK_EQ(read_record_id(output), i + 900);
+    }
+    CHECK_OK(wl_unmount(0));
+
+    mount_mock_storage();
+    CHECK_OK(init_mock_buffer_with_user_header(&cb, 2, record_size, 1, 0));
+    CHECK_EQ(circular_buffer_get_record_num(&cb), 3);
+    CHECK_OK(circular_buffer_read_user_header(&cb, full_header, sizeof(updated_notes)));
+    CHECK_TRUE(memcmp(full_header, updated_notes, sizeof(updated_notes)) == 0);
+
+    for (i = 0; i < 3; ++i) {
+        CHECK_OK(circular_buffer_pop_front(&cb, output));
+        CHECK_EQ(read_record_id(output), i + 900);
+    }
+    CHECK_OK(wl_unmount(0));
+}
+
+static void test_user_header_capacity_and_validation(void) {
+    const size_t record_size = 64;
+    CircularBuffer cb;
+    uint8_t byte = 0xA5;
+    uint8_t readback;
+    size_t base_capacity;
+    size_t records_per_sector = SECTOR_SIZE / (record_size + 1);
+
+    fresh_buffer(&cb, record_size, 1, 0);
+    base_capacity = circular_buffer_get_max_records(&cb);
+    CHECK_OK(wl_unmount(0));
+
+    fresh_buffer_with_user_header(&cb, 3, record_size, 1, 0);
+    CHECK_EQ(circular_buffer_get_max_records(&cb), base_capacity - (3 * records_per_sector));
+
+    CHECK_EQ(circular_buffer_read_user_header(NULL, &readback, sizeof(readback)), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_write_user_header(NULL, &byte, sizeof(byte)), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_read_user_header(&cb, NULL, sizeof(readback)), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_write_user_header(&cb, NULL, sizeof(byte)), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_read_user_header(&cb, &readback, circular_buffer_get_user_header_size(&cb) + 1),
+             CIRCULAR_BUFFER_ERR_INVALID_SIZE);
+    CHECK_EQ(circular_buffer_write_user_header(&cb, &byte, circular_buffer_get_user_header_size(&cb) + 1),
+             CIRCULAR_BUFFER_ERR_INVALID_SIZE);
+    CHECK_OK(circular_buffer_read_user_header(&cb, NULL, 0));
+    CHECK_OK(circular_buffer_write_user_header(&cb, NULL, 0));
+    CHECK_OK(wl_unmount(0));
+
+    wl_mock_set_reset_on_mount(1);
+    wl_mock_reset_flash();
+    mount_mock_storage();
+    CHECK_EQ(circular_buffer_init(&cb,
+                                  SECTOR_SIZE,
+                                  storage_read,
+                                  storage_erase_range,
+                                  storage_write,
+                                  3 * SECTOR_SIZE,
+                                  &wl_handle,
+                                  1,
+                                  record_size,
+                                  1,
+                                  0),
+             CIRCULAR_BUFFER_ERR_INVALID_SIZE);
+    CHECK_OK(wl_unmount(0));
+}
+
 static void test_recovery_mode_revives_record_after_latest_header_corruption(void) {
     const size_t record_size = 64;
     CircularBuffer cb;
@@ -520,6 +636,8 @@ int main(void) {
     test_overwrite_wraps_without_ff_records();
     test_no_overwrite_reports_full_and_preserves_data();
     test_remount_preserves_header_and_records();
+    test_user_header_read_write_and_remount();
+    test_user_header_capacity_and_validation();
     test_recovery_mode_revives_record_after_latest_header_corruption();
     test_randomized_against_model();
 
