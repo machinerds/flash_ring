@@ -3,10 +3,11 @@
 #include "esp_crc.h"
 
 #include <stdbool.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define MAGIC 0x5B15B1
+#define RECORD_COMMIT_MAGIC 0x0B
+#define RECORD_COMMIT_MASK 0x0F
 
 typedef struct cb_header {
     uint32_t magic;
@@ -23,7 +24,9 @@ struct cb_header_crc_data {
     uint32_t sequence;
 };
 
-static size_t records_in_sec(CircularBuffer *cb) { return cb->sector_size / cb->record_size; }
+static size_t record_slot_size(CircularBuffer *cb) { return cb->record_size + 1; }
+
+static size_t records_in_sec(CircularBuffer *cb) { return cb->sector_size / record_slot_size(cb); }
 
 static size_t secs_for_one_header(CircularBuffer *cb) {
     size_t sec_size = cb->sector_size;
@@ -46,14 +49,15 @@ size_t circular_buffer_get_max_records(CircularBuffer *cb) { return sec_num(cb) 
 
 static size_t get_record_addr(CircularBuffer *cb, size_t index) {
     size_t sec_size = cb->sector_size;
-    uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
-    if (remaining_capacity_in_front_sector > index) { return cb->front + (index * cb->record_size); }
+    size_t slot_size = record_slot_size(cb);
+    uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / slot_size;
+    if (remaining_capacity_in_front_sector > index) { return cb->front + (index * slot_size); }
     else {
         uint32_t remaining_records = index - remaining_capacity_in_front_sector;
         uint32_t full_secs = remaining_records / records_in_sec(cb);
         uint32_t front_sec = cb->front / sec_size;
         uint32_t record_sec = (front_sec + full_secs + 1) % sec_num(cb);
-        size_t record_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
+        size_t record_offset_in_sec = (remaining_records % records_in_sec(cb)) * slot_size;
         return record_sec * sec_size + record_offset_in_sec;
     }
 }
@@ -62,13 +66,8 @@ static size_t get_back(CircularBuffer *cb) {
     return get_record_addr(cb, cb->record_num);
 }
 
-static bool is_all_ff(const void *ptr, size_t len) {
-    const uint8_t *p = (const uint8_t *)ptr;
-    size_t i;
-    for (i = 0; i < len; i++) {
-        if (p[i] != 0xFF) return false;
-    }
-    return true;
+static bool is_record_committed(uint8_t commit) {
+    return (commit & RECORD_COMMIT_MASK) == RECORD_COMMIT_MAGIC;
 }
 
 static uint32_t header_crc(const cb_header *hdr) {
@@ -132,7 +131,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
     if (cb == NULL || read == NULL || erase_range == NULL || write == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (sector_size == 0 || total_size == 0 || record_size == 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
     if (total_size % sector_size != 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
-    if (record_size > sector_size) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (record_size >= sector_size) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
 
     cb->sector_size = sector_size;
     cb->total_size = total_size;
@@ -156,8 +155,6 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
     bool header1_valid = check_header(&header1);
     bool header2_valid = check_header(&header2);
 
-    void *next = NULL;
-
     if (header1_valid && header2_valid) {
         if (header1.sequence > header2.sequence || (header1.sequence == 0 && header2.sequence == UINT32_MAX)) {
             cb->front = header1.front;
@@ -180,14 +177,13 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
         }
         size_t back = get_back(cb);
         if (back % sec_size != 0) {
-            next = malloc(record_size);
-            if (next == NULL) { return CIRCULAR_BUFFER_ERR_NO_MEM; }
-            err = cb->read(cb->storage_ctx, header_offset(cb) + back, next, record_size);
-            if (err != CIRCULAR_BUFFER_OK) { goto cleanup; }
-            if (!is_all_ff(next, record_size)) {
+            uint8_t commit;
+            err = cb->read(cb->storage_ctx, header_offset(cb) + back + cb->record_size, &commit, sizeof(commit));
+            if (err != CIRCULAR_BUFFER_OK) { return err; }
+            if (is_record_committed(commit)) {
                 ++cb->record_num;
                 err = write_header(cb);
-                if (err != CIRCULAR_BUFFER_OK) { goto cleanup; }
+                if (err != CIRCULAR_BUFFER_OK) { return err; }
             }
         }
     } else {
@@ -198,8 +194,6 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
         if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
 
-cleanup:
-    free(next);
     return err;
 }
 
@@ -211,13 +205,16 @@ cleanup:
 circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
     circular_buffer_err_t err;
     size_t sec_size;
+    size_t slot_size;
     size_t back;
+    uint8_t commit = 0xF0 | RECORD_COMMIT_MAGIC;
 
     if (cb == NULL || src == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     sec_size = cb->sector_size;
+    slot_size = record_slot_size(cb);
 
-    uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
-    if (remaining_capacity_in_front_sector > cb->record_num) { back = cb->front + (cb->record_num * cb->record_size); }
+    uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / slot_size;
+    if (remaining_capacity_in_front_sector > cb->record_num) { back = cb->front + (cb->record_num * slot_size); }
     else {
         uint32_t remaining_records = cb->record_num - remaining_capacity_in_front_sector;
         uint32_t full_secs = remaining_records / records_in_sec(cb);
@@ -230,7 +227,7 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
             }
             else { return CIRCULAR_BUFFER_ERR_NO_MEM; }
         }
-        size_t back_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
+        size_t back_offset_in_sec = (remaining_records % records_in_sec(cb)) * slot_size;
         back = back_sec * sec_size + back_offset_in_sec;
     }
     if (back % sec_size == 0) {
@@ -238,6 +235,8 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
         if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
     err = cb->write(cb->storage_ctx, back + header_offset(cb), src, cb->record_size);
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
+    err = cb->write(cb->storage_ctx, back + header_offset(cb) + cb->record_size, &commit, sizeof(commit));
     if (err != CIRCULAR_BUFFER_OK) { return err; }
     cb->record_num++;
     return write_header(cb);
@@ -260,10 +259,15 @@ circular_buffer_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest)
  */
 circular_buffer_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void* dest) {
     size_t addr;
+    uint8_t commit;
+    circular_buffer_err_t err;
 
     if (cb == NULL || dest == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (index >= cb->record_num) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
     addr = get_record_addr(cb, index);
+    err = cb->read(cb->storage_ctx, addr + header_offset(cb) + cb->record_size, &commit, sizeof(commit));
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
+    if (!is_record_committed(commit)) { return CIRCULAR_BUFFER_ERR_INVALID_RECORD; }
     return cb->read(cb->storage_ctx, addr + header_offset(cb), dest, cb->record_size);
 }
 
@@ -291,7 +295,8 @@ circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb) {
     if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (cb->record_num == 0) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
     size_t sec_size = cb->sector_size;
-    if (sec_size - (cb->front % sec_size) >= 2 * cb->record_size) { cb->front += cb->record_size; }
+    size_t slot_size = record_slot_size(cb);
+    if (sec_size - (cb->front % sec_size) >= 2 * slot_size) { cb->front += slot_size; }
     else { cb->front = ((cb->front / sec_size) + 1) % sec_num(cb) * sec_size; }
     cb->record_num--;
     return write_header(cb);

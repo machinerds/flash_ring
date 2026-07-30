@@ -205,25 +205,46 @@ static void test_peek_at_reads_index_without_deleting(void) {
     CHECK_OK(wl_unmount(0));
 }
 
+static void test_read_rejects_uncommitted_record(void) {
+    const size_t record_size = 64;
+    CircularBuffer cb;
+    uint8_t input[64];
+    uint8_t output[64];
+    uint8_t corrupt_commit = 0xFF;
+
+    fresh_buffer(&cb, record_size, 1, 0);
+
+    fill_record(input, record_size, 500);
+    CHECK_OK(circular_buffer_push_back(&cb, input));
+
+    CHECK_OK(wl_mock_overwrite((2 * SECTOR_SIZE) + record_size, &corrupt_commit, sizeof(corrupt_commit)));
+    CHECK_EQ(circular_buffer_peek_front(&cb, output), CIRCULAR_BUFFER_ERR_INVALID_RECORD);
+    CHECK_EQ(circular_buffer_get_record_num(&cb), 1);
+
+    CHECK_OK(wl_unmount(0));
+}
+
 static void test_overwrite_wraps_without_ff_records(void) {
     const size_t record_size = SECTOR_SIZE / 4;
     CircularBuffer cb;
     uint8_t input[SECTOR_SIZE / 4];
     uint8_t output[SECTOR_SIZE / 4];
     uint32_t max_records;
+    uint32_t records_per_sector;
     uint32_t i;
     uint32_t expected;
 
     fresh_buffer(&cb, record_size, 1, 0);
     max_records = (uint32_t)circular_buffer_get_max_records(&cb);
+    records_per_sector = (uint32_t)(SECTOR_SIZE / (record_size + 1));
 
-    for (i = 0; i < max_records + 4; ++i) {
+    for (i = 0; i < max_records + records_per_sector; ++i) {
         fill_record(input, record_size, i);
         CHECK_OK(circular_buffer_push_back(&cb, input));
     }
 
     CHECK_EQ(circular_buffer_get_record_num(&cb), max_records);
-    for (expected = 4; expected < max_records + 4; ++expected) {
+    for (expected = records_per_sector; expected < max_records + records_per_sector; ++expected) {
         CHECK_OK(circular_buffer_pop_front(&cb, output));
         CHECK_TRUE(!all_ff(output, record_size));
         CHECK_EQ(read_record_id(output), expected);
@@ -363,7 +384,7 @@ static void run_randomized_model(size_t record_size, int overwrite) {
     expected = (uint32_t *)malloc(max_records * sizeof(uint32_t));
     if (input == NULL || output == NULL || expected == NULL) fail("malloc failed", __LINE__);
 
-    records_per_sector = SECTOR_SIZE / record_size;
+    records_per_sector = SECTOR_SIZE / (record_size + 1);
     sector_count = max_records / records_per_sector;
 
     for (step = 0; step < 6000; ++step) {
@@ -453,6 +474,7 @@ int main(void) {
     test_delete_front_keeps_last_record_in_sector();
     test_delete_front_crosses_partial_sector();
     test_peek_at_reads_index_without_deleting();
+    test_read_rejects_uncommitted_record();
     test_overwrite_wraps_without_ff_records();
     test_no_overwrite_reports_full_and_preserves_data();
     test_remount_preserves_header_and_records();

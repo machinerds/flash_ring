@@ -15,6 +15,7 @@ typedef enum {
     CIRCULAR_BUFFER_ERR_INVALID_ARG = -3,
     CIRCULAR_BUFFER_ERR_INVALID_SIZE = -4,
     CIRCULAR_BUFFER_ERR_NOT_FOUND = -5,
+    CIRCULAR_BUFFER_ERR_INVALID_RECORD = -6,
 } circular_buffer_err_t;
 
 typedef circular_buffer_err_t (*circular_buffer_read_fn)(void *ctx, size_t src_addr, void *dest, size_t size);
