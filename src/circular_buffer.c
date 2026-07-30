@@ -89,7 +89,7 @@ static bool check_header(const cb_header *hdr) {
     return header_crc(hdr) == hdr->crc && hdr->magic == MAGIC;
 }
 
-static esp_err_t write_header(CircularBuffer *cb) {
+static circular_buffer_err_t write_header(CircularBuffer *cb) {
     cb_header header;
     memset(&header, 0, sizeof(header));
     header.magic = MAGIC;
@@ -98,8 +98,8 @@ static esp_err_t write_header(CircularBuffer *cb) {
     header.sequence = ++cb->sequence;
     update_crc(&header);
     size_t addr = (cb->sequence % 2) * secs_for_one_header(cb) * cb->sector_size;
-    esp_err_t err = cb->erase_range(cb->storage_ctx, addr, secs_for_one_header(cb) * cb->sector_size);
-    if (err != ESP_OK) { return err; }
+    circular_buffer_err_t err = cb->erase_range(cb->storage_ctx, addr, secs_for_one_header(cb) * cb->sector_size);
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
     return cb->write(cb->storage_ctx, addr, &header, sizeof(header));
 }
 
@@ -114,9 +114,9 @@ static esp_err_t write_header(CircularBuffer *cb) {
  * @param record_size  size of every record in circular buffer
  * @param overwrite whether overwrite feature should be turned on
  * @param recovery_mode use backup header if header was correupted (this may cause in at most one corrupted record)
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_init(CircularBuffer *cb,
+circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
                                size_t sector_size,
                                circular_buffer_read_fn read,
                                circular_buffer_erase_range_fn erase_range,
@@ -126,13 +126,13 @@ esp_err_t circular_buffer_init(CircularBuffer *cb,
                                size_t record_size,
                                int overwrite,
                                int recovery_mode) {
-    esp_err_t err = ESP_OK;
+    circular_buffer_err_t err = CIRCULAR_BUFFER_OK;
     size_t sec_size = sector_size;
 
-    if (cb == NULL || read == NULL || erase_range == NULL || write == NULL) { return ESP_ERR_INVALID_ARG; }
-    if (sector_size == 0 || total_size == 0 || record_size == 0) { return ESP_ERR_INVALID_SIZE; }
-    if (total_size % sector_size != 0) { return ESP_ERR_INVALID_SIZE; }
-    if (record_size > sector_size) { return ESP_ERR_INVALID_SIZE; }
+    if (cb == NULL || read == NULL || erase_range == NULL || write == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (sector_size == 0 || total_size == 0 || record_size == 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (total_size % sector_size != 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
+    if (record_size > sector_size) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
 
     cb->sector_size = sector_size;
     cb->total_size = total_size;
@@ -143,15 +143,15 @@ esp_err_t circular_buffer_init(CircularBuffer *cb,
     cb->record_size = record_size;
     cb->overwrite = overwrite;
 
-    if (sec_num(cb) == 0 || records_in_sec(cb) == 0) { return ESP_ERR_INVALID_SIZE; }
+    if (sec_num(cb) == 0 || records_in_sec(cb) == 0) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
 
     cb_header header1;
     err = cb->read(cb->storage_ctx, 0, &header1, sizeof(cb_header));
-    if (err != ESP_OK) { return err; }
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
 
     cb_header header2;
     err = cb->read(cb->storage_ctx, secs_for_one_header(cb) * sec_size, &header2, sizeof(cb_header));
-    if (err != ESP_OK) { return err; }
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
 
     bool header1_valid = check_header(&header1);
     bool header2_valid = check_header(&header2);
@@ -181,13 +181,13 @@ esp_err_t circular_buffer_init(CircularBuffer *cb,
         size_t back = get_back(cb);
         if (back % sec_size != 0) {
             next = malloc(record_size);
-            if (next == NULL) { return ESP_ERR_NO_MEM; }
+            if (next == NULL) { return CIRCULAR_BUFFER_ERR_NO_MEM; }
             err = cb->read(cb->storage_ctx, header_offset(cb) + back, next, record_size);
-            if (err != ESP_OK) { goto cleanup; }
+            if (err != CIRCULAR_BUFFER_OK) { goto cleanup; }
             if (!is_all_ff(next, record_size)) {
                 ++cb->record_num;
                 err = write_header(cb);
-                if (err != ESP_OK) { goto cleanup; }
+                if (err != CIRCULAR_BUFFER_OK) { goto cleanup; }
             }
         }
     } else {
@@ -195,7 +195,7 @@ esp_err_t circular_buffer_init(CircularBuffer *cb,
         cb->record_num = 0;
         cb->sequence = -1;
         err = write_header(cb);
-        if (err != ESP_OK) { return err; }
+        if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
 
 cleanup:
@@ -206,14 +206,14 @@ cleanup:
 /**
  * Pushes data to the back of circular buffer
  * @param src source of data
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
-    esp_err_t err;
+circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
+    circular_buffer_err_t err;
     size_t sec_size;
     size_t back;
 
-    if (cb == NULL || src == NULL) { return ESP_ERR_INVALID_ARG; }
+    if (cb == NULL || src == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     sec_size = cb->sector_size;
 
     uint32_t remaining_capacity_in_front_sector = (sec_size - (cb->front % sec_size)) / cb->record_size;
@@ -228,17 +228,17 @@ esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
                 cb->front = ((front_sec + 1) % sec_num(cb)) * sec_size;
                 cb->record_num -= remaining_capacity_in_front_sector;
             }
-            else { return ESP_ERR_NO_MEM; }
+            else { return CIRCULAR_BUFFER_ERR_NO_MEM; }
         }
         size_t back_offset_in_sec = (remaining_records % records_in_sec(cb)) * cb->record_size;
         back = back_sec * sec_size + back_offset_in_sec;
     }
     if (back % sec_size == 0) {
         err = cb->erase_range(cb->storage_ctx, back + header_offset(cb), sec_size);
-        if (err != ESP_OK) { return err; }
+        if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
     err = cb->write(cb->storage_ctx, back + header_offset(cb), src, cb->record_size);
-    if (err != ESP_OK) { return err; }
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
     cb->record_num++;
     return write_header(cb);
 }
@@ -246,9 +246,9 @@ esp_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
 /**
  * Retrieves data from the front of the circular buffer
  * @param dest destination of data
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest) {
+circular_buffer_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest) {
     return circular_buffer_peek_at(cb, 0, dest);
 }
 
@@ -256,13 +256,13 @@ esp_err_t circular_buffer_peek_front(CircularBuffer *cb, void* dest) {
  * Retrieves data from the circular buffer without deleting it
  * @param index record index from the front
  * @param dest destination of data
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void* dest) {
+circular_buffer_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void* dest) {
     size_t addr;
 
-    if (cb == NULL || dest == NULL) { return ESP_ERR_INVALID_ARG; }
-    if (index >= cb->record_num) { return ESP_ERR_NOT_FOUND; }
+    if (cb == NULL || dest == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (index >= cb->record_num) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
     addr = get_record_addr(cb, index);
     return cb->read(cb->storage_ctx, addr + header_offset(cb), dest, cb->record_size);
 }
@@ -270,11 +270,11 @@ esp_err_t circular_buffer_peek_at(CircularBuffer *cb, size_t index, void* dest) 
 /**
  * Retrieves data from the front of the circular buffer and deletes it
  * @param dest destination of data
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_pop_front(CircularBuffer *cb, void* dest) {
-    esp_err_t err = circular_buffer_peek_front(cb, dest);
-    if (err != ESP_OK) { return err; }
+circular_buffer_err_t circular_buffer_pop_front(CircularBuffer *cb, void* dest) {
+    circular_buffer_err_t err = circular_buffer_peek_front(cb, dest);
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
     return circular_buffer_delete_front(cb);
 }
 
@@ -285,11 +285,11 @@ uint32_t circular_buffer_get_record_num(CircularBuffer *cb) { return cb->record_
 
 /**
  * Deletes one record from the front of the circular buffer
- * @return ESP_OK if ok
+ * @return CIRCULAR_BUFFER_OK if ok
  */
-esp_err_t circular_buffer_delete_front(CircularBuffer *cb) {
-    if (cb == NULL) { return ESP_ERR_INVALID_ARG; }
-    if (cb->record_num == 0) { return ESP_ERR_NOT_FOUND; }
+circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb) {
+    if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+    if (cb->record_num == 0) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
     size_t sec_size = cb->sector_size;
     if (sec_size - (cb->front % sec_size) >= 2 * cb->record_size) { cb->front += cb->record_size; }
     else { cb->front = ((cb->front / sec_size) + 1) % sec_num(cb) * sec_size; }

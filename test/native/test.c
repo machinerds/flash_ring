@@ -19,8 +19,8 @@ static void fail(const char *message, int line) {
     exit(1);
 }
 
-static void check_ok(esp_err_t err, const char *expr, int line) {
-    if (err != ESP_OK) {
+static void check_ok(circular_buffer_err_t err, const char *expr, int line) {
+    if (err != CIRCULAR_BUFFER_OK) {
         char message[160];
         snprintf(message, sizeof(message), "%s returned %d", expr, err);
         fail(message, line);
@@ -36,6 +36,18 @@ static void check_eq(size_t actual, size_t expected, const char *actual_expr, co
         char message[200];
         snprintf(message, sizeof(message), "%s == %zu, expected %s == %zu", actual_expr, actual, expected_expr, expected);
         fail(message, line);
+    }
+}
+
+static circular_buffer_err_t map_esp_err(esp_err_t err) {
+    switch (err) {
+        case ESP_OK: return CIRCULAR_BUFFER_OK;
+        case ESP_FAIL: return CIRCULAR_BUFFER_FAIL;
+        case ESP_ERR_NO_MEM: return CIRCULAR_BUFFER_ERR_NO_MEM;
+        case ESP_ERR_INVALID_ARG: return CIRCULAR_BUFFER_ERR_INVALID_ARG;
+        case ESP_ERR_INVALID_SIZE: return CIRCULAR_BUFFER_ERR_INVALID_SIZE;
+        case ESP_ERR_NOT_FOUND: return CIRCULAR_BUFFER_ERR_NOT_FOUND;
+        default: return CIRCULAR_BUFFER_FAIL;
     }
 }
 
@@ -55,16 +67,16 @@ static uint32_t read_record_id(const uint8_t *record) {
     return value;
 }
 
-static esp_err_t storage_read(void *ctx, size_t src_addr, void *dest, size_t size) {
-    return wl_read(*(wl_handle_t *)ctx, src_addr, dest, size);
+static circular_buffer_err_t storage_read(void *ctx, size_t src_addr, void *dest, size_t size) {
+    return map_esp_err(wl_read(*(wl_handle_t *)ctx, src_addr, dest, size));
 }
 
-static esp_err_t storage_erase_range(void *ctx, size_t start_addr, size_t size) {
-    return wl_erase_range(*(wl_handle_t *)ctx, start_addr, size);
+static circular_buffer_err_t storage_erase_range(void *ctx, size_t start_addr, size_t size) {
+    return map_esp_err(wl_erase_range(*(wl_handle_t *)ctx, start_addr, size));
 }
 
-static esp_err_t storage_write(void *ctx, size_t dest_addr, const void *src, size_t size) {
-    return wl_write(*(wl_handle_t *)ctx, dest_addr, src, size);
+static circular_buffer_err_t storage_write(void *ctx, size_t dest_addr, const void *src, size_t size) {
+    return map_esp_err(wl_write(*(wl_handle_t *)ctx, dest_addr, src, size));
 }
 
 static void mount_mock_storage(void) {
@@ -78,7 +90,7 @@ static void mount_mock_storage(void) {
     CHECK_OK(wl_mount(partition, &wl_handle));
 }
 
-static esp_err_t init_mock_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
+static circular_buffer_err_t init_mock_buffer(CircularBuffer *cb, size_t record_size, int overwrite, int recovery_mode) {
     return circular_buffer_init(cb,
                                 wl_sector_size(wl_handle),
                                 storage_read,
@@ -134,8 +146,8 @@ static void test_delete_front_keeps_last_record_in_sector(void) {
     CHECK_OK(circular_buffer_pop_front(&cb, output));
     CHECK_EQ(read_record_id(output), 3);
     CHECK_EQ(circular_buffer_get_record_num(&cb), 0);
-    CHECK_EQ(circular_buffer_delete_front(&cb), ESP_ERR_NOT_FOUND);
-    CHECK_EQ(circular_buffer_pop_front(&cb, output), ESP_ERR_NOT_FOUND);
+    CHECK_EQ(circular_buffer_delete_front(&cb), CIRCULAR_BUFFER_ERR_NOT_FOUND);
+    CHECK_EQ(circular_buffer_pop_front(&cb, output), CIRCULAR_BUFFER_ERR_NOT_FOUND);
     CHECK_OK(wl_unmount(0));
 }
 
@@ -183,9 +195,9 @@ static void test_peek_at_reads_index_without_deleting(void) {
         CHECK_EQ(read_record_id(output), i + 11);
     }
 
-    CHECK_EQ(circular_buffer_peek_at(&cb, 4, output), ESP_ERR_NOT_FOUND);
-    CHECK_EQ(circular_buffer_peek_at(NULL, 0, output), ESP_ERR_INVALID_ARG);
-    CHECK_EQ(circular_buffer_peek_at(&cb, 0, NULL), ESP_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_peek_at(&cb, 4, output), CIRCULAR_BUFFER_ERR_NOT_FOUND);
+    CHECK_EQ(circular_buffer_peek_at(NULL, 0, output), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_peek_at(&cb, 0, NULL), CIRCULAR_BUFFER_ERR_INVALID_ARG);
     CHECK_EQ(circular_buffer_get_record_num(&cb), 4);
 
     CHECK_OK(circular_buffer_pop_front(&cb, output));
@@ -237,7 +249,7 @@ static void test_no_overwrite_reports_full_and_preserves_data(void) {
     }
 
     fill_record(input, record_size, 999999);
-    CHECK_EQ(circular_buffer_push_back(&cb, input), ESP_ERR_NO_MEM);
+    CHECK_EQ(circular_buffer_push_back(&cb, input), CIRCULAR_BUFFER_ERR_NO_MEM);
     CHECK_EQ(circular_buffer_get_record_num(&cb), max_records);
 
     CHECK_OK(circular_buffer_pop_front(&cb, output));
@@ -358,12 +370,12 @@ static void run_randomized_model(size_t record_size, int overwrite) {
         uint32_t op = next_rand(&rng) % 100;
 
         if (op < 45) {
-            esp_err_t err;
+            circular_buffer_err_t err;
             fill_record(input, record_size, next_value);
             err = circular_buffer_push_back(&cb, input);
             if (expected_count == max_records) {
                 if (!overwrite) {
-                    CHECK_EQ(err, ESP_ERR_NO_MEM);
+                    CHECK_EQ(err, CIRCULAR_BUFFER_ERR_NO_MEM);
                     CHECK_EQ(circular_buffer_get_record_num(&cb), expected_count);
                     ++next_value;
                     continue;
@@ -384,9 +396,9 @@ static void run_randomized_model(size_t record_size, int overwrite) {
             expected_count++;
             ++next_value;
         } else if (op < 70) {
-            esp_err_t err = circular_buffer_pop_front(&cb, output);
+            circular_buffer_err_t err = circular_buffer_pop_front(&cb, output);
             if (expected_count == 0) {
-                CHECK_EQ(err, ESP_ERR_NOT_FOUND);
+                CHECK_EQ(err, CIRCULAR_BUFFER_ERR_NOT_FOUND);
             } else {
                 CHECK_OK(err);
                 CHECK_TRUE(!all_ff(output, record_size));
@@ -395,9 +407,9 @@ static void run_randomized_model(size_t record_size, int overwrite) {
                 model_front_slot = (model_front_slot + 1) % max_records;
             }
         } else if (op < 85) {
-            esp_err_t err = circular_buffer_peek_front(&cb, output);
+            circular_buffer_err_t err = circular_buffer_peek_front(&cb, output);
             if (expected_count == 0) {
-                CHECK_EQ(err, ESP_ERR_NOT_FOUND);
+                CHECK_EQ(err, CIRCULAR_BUFFER_ERR_NOT_FOUND);
             } else {
                 CHECK_OK(err);
                 CHECK_TRUE(!all_ff(output, record_size));
