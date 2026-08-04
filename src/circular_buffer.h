@@ -23,9 +23,9 @@ typedef enum {
     CIRCULAR_BUFFER_ERR_INVALID_RECORD = -6,
 } circular_buffer_err_t;
 
-typedef circular_buffer_err_t (*circular_buffer_read_fn)(void *ctx, size_t src_addr, void *dest, size_t size);
-typedef circular_buffer_err_t (*circular_buffer_erase_range_fn)(void *ctx, size_t start_addr, size_t size);
-typedef circular_buffer_err_t (*circular_buffer_write_fn)(void *ctx, size_t dest_addr, const void *src, size_t size);
+typedef circular_buffer_err_t (*circular_buffer_read_fn)(const void *ctx, size_t src_addr, void *dest, size_t size);
+typedef circular_buffer_err_t (*circular_buffer_erase_range_fn)(const void *ctx, size_t start_addr, size_t size);
+typedef circular_buffer_err_t (*circular_buffer_write_fn)(const void *ctx, size_t dest_addr, const void *src, size_t size);
 
 typedef struct {
     size_t front;
@@ -35,7 +35,7 @@ typedef struct {
     size_t total_size;
     size_t user_header_sectors;
     uint32_t sequence;
-    void *storage_ctx;
+    const void *storage_ctx;
     circular_buffer_read_fn read;
     circular_buffer_erase_range_fn erase_range;
     circular_buffer_write_fn write;
@@ -49,7 +49,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
                                            circular_buffer_erase_range_fn erase_range,
                                            circular_buffer_write_fn write,
                                            size_t total_size,
-                                           void *storage_ctx,
+                                           const void *storage_ctx,
                                            size_t user_header_sectors,
                                            size_t record_size,
                                            int overwrite,

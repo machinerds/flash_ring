@@ -65,16 +65,16 @@ static uint32_t read_record_id(const uint8_t *record) {
     return value;
 }
 
-static circular_buffer_err_t storage_read(void *ctx, size_t src_addr, void *dest, size_t size) {
-    return map_esp_err(wl_read(*(wl_handle_t *)ctx, src_addr, dest, size));
+static circular_buffer_err_t storage_read(const void *ctx, size_t src_addr, void *dest, size_t size) {
+    return map_esp_err(wl_read(*(const wl_handle_t *)ctx, src_addr, dest, size));
 }
 
-static circular_buffer_err_t storage_erase_range(void *ctx, size_t start_addr, size_t size) {
-    return map_esp_err(wl_erase_range(*(wl_handle_t *)ctx, start_addr, size));
+static circular_buffer_err_t storage_erase_range(const void *ctx, size_t start_addr, size_t size) {
+    return map_esp_err(wl_erase_range(*(const wl_handle_t *)ctx, start_addr, size));
 }
 
-static circular_buffer_err_t storage_write(void *ctx, size_t dest_addr, const void *src, size_t size) {
-    return map_esp_err(wl_write(*(wl_handle_t *)ctx, dest_addr, src, size));
+static circular_buffer_err_t storage_write(const void *ctx, size_t dest_addr, const void *src, size_t size) {
+    return map_esp_err(wl_write(*(const wl_handle_t *)ctx, dest_addr, src, size));
 }
 
 static void mount_mock_storage(void) {
