@@ -526,3 +526,12 @@ circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t inde
     }
     return CIRCULAR_BUFFER_OK;
 }
+
+circular_buffer_err_t circular_buffer_erase_all(CircularBuffer *cb) {
+    if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
+
+    cb->record_num = 0;
+    cb->front = 0;
+    clear_first_flagged_records(cb);
+    return write_header(cb);
+}

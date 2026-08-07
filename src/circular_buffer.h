@@ -63,6 +63,7 @@ circular_buffer_err_t circular_buffer_peek_front(CircularBuffer *cb, void *dest)
 circular_buffer_err_t circular_buffer_pop_front(CircularBuffer *cb, void *dest);
 circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb);
 circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t index, size_t flag);
+circular_buffer_err_t circular_buffer_erase_all(CircularBuffer *cb);
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb);
 size_t circular_buffer_get_max_records(CircularBuffer *cb);
 size_t circular_buffer_get_user_header_sectors(CircularBuffer *cb);
