@@ -41,6 +41,7 @@ typedef struct {
     circular_buffer_write_fn write;
     int overwrite;
     size_t first_flagged_record[4];
+    size_t flagged_record_num[4];
 } CircularBuffer;
 
 circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
@@ -65,6 +66,9 @@ circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb);
 circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t index, size_t flag);
 circular_buffer_err_t circular_buffer_erase_all(CircularBuffer *cb);
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb);
+circular_buffer_err_t circular_buffer_get_record_num_with_flag(CircularBuffer *cb,
+                                                               size_t flag,
+                                                               size_t *record_num);
 size_t circular_buffer_get_max_records(CircularBuffer *cb);
 size_t circular_buffer_get_user_header_sectors(CircularBuffer *cb);
 size_t circular_buffer_get_user_header_size(CircularBuffer *cb);

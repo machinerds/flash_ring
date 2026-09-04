@@ -139,6 +139,12 @@ static void fresh_buffer_with_user_header(CircularBuffer *cb,
     wl_mock_set_reset_on_mount(0);
 }
 
+static size_t flagged_record_count(CircularBuffer *cb, size_t flag) {
+    size_t record_num;
+    CHECK_OK(circular_buffer_get_record_num_with_flag(cb, flag, &record_num));
+    return record_num;
+}
+
 static void test_delete_front_keeps_last_record_in_sector(void) {
     const size_t record_size = SECTOR_SIZE / 4;
     CircularBuffer cb;
@@ -253,9 +259,20 @@ static void test_flagged_records_can_be_found_and_cleared(void) {
 
     fresh_buffer(&cb, record_size, 1, 0);
 
+    for (i = 0; i < 4; ++i) {
+        CHECK_EQ(flagged_record_count(&cb, i), 0);
+    }
+    CHECK_EQ(circular_buffer_get_record_num_with_flag(NULL, 0, &record_index), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_get_record_num_with_flag(&cb, 4, &record_index), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+    CHECK_EQ(circular_buffer_get_record_num_with_flag(&cb, 0, NULL), CIRCULAR_BUFFER_ERR_INVALID_ARG);
+
     for (i = 0; i < 5; ++i) {
         fill_record(input, record_size, i + 700);
         CHECK_OK(circular_buffer_push_back(&cb, input));
+    }
+
+    for (i = 0; i < 4; ++i) {
+        CHECK_EQ(flagged_record_count(&cb, i), 5);
     }
 
     CHECK_EQ(cb.first_flagged_record[2], 0);
@@ -264,16 +281,21 @@ static void test_flagged_records_can_be_found_and_cleared(void) {
     CHECK_EQ(read_record_id(output), 702);
 
     CHECK_OK(circular_buffer_clear_flag(&cb, 0, 2));
+    CHECK_EQ(flagged_record_count(&cb, 2), 4);
     CHECK_OK(circular_buffer_clear_flag(&cb, 0, 2));
+    CHECK_EQ(flagged_record_count(&cb, 2), 4);
     CHECK_EQ(cb.first_flagged_record[2], 1);
 
     CHECK_OK(circular_buffer_clear_flag(&cb, 1, 2));
+    CHECK_EQ(flagged_record_count(&cb, 2), 3);
     CHECK_EQ(cb.first_flagged_record[2], 2);
     CHECK_OK(circular_buffer_peek_flagged(&cb, 0, 2, output, &record_index));
     CHECK_EQ(record_index, 2);
     CHECK_EQ(read_record_id(output), 702);
 
     CHECK_OK(circular_buffer_delete_front(&cb));
+    CHECK_EQ(flagged_record_count(&cb, 0), 4);
+    CHECK_EQ(flagged_record_count(&cb, 2), 3);
     CHECK_EQ(cb.first_flagged_record[2], 1);
     CHECK_OK(circular_buffer_peek_flagged(&cb, 0, 2, output, &record_index));
     CHECK_EQ(record_index, 1);
@@ -284,6 +306,40 @@ static void test_flagged_records_can_be_found_and_cleared(void) {
     CHECK_EQ(circular_buffer_clear_flag(&cb, 4, 2), CIRCULAR_BUFFER_ERR_NOT_FOUND);
     CHECK_EQ(circular_buffer_clear_flag(&cb, 0, 4), CIRCULAR_BUFFER_ERR_INVALID_ARG);
 
+    CHECK_OK(circular_buffer_erase_all(&cb));
+    for (i = 0; i < 4; ++i) {
+        CHECK_EQ(flagged_record_count(&cb, i), 0);
+    }
+
+    CHECK_OK(wl_unmount(0));
+}
+
+static void test_overwrite_updates_flagged_record_counts(void) {
+    const size_t record_size = SECTOR_SIZE / 4;
+    CircularBuffer cb;
+    uint8_t input[SECTOR_SIZE / 4];
+    size_t max_records;
+    size_t records_per_sector;
+    size_t i;
+
+    fresh_buffer(&cb, record_size, 1, 0);
+    max_records = circular_buffer_get_max_records(&cb);
+    records_per_sector = SECTOR_SIZE / (record_size + 1);
+
+    for (i = 0; i < max_records; ++i) {
+        fill_record(input, record_size, (uint32_t)i);
+        CHECK_OK(circular_buffer_push_back(&cb, input));
+    }
+
+    CHECK_OK(circular_buffer_clear_flag(&cb, 0, 0));
+    CHECK_OK(circular_buffer_clear_flag(&cb, records_per_sector, 1));
+
+    fill_record(input, record_size, 999999);
+    CHECK_OK(circular_buffer_push_back(&cb, input));
+
+    CHECK_EQ(flagged_record_count(&cb, 0), max_records - records_per_sector + 1);
+    CHECK_EQ(flagged_record_count(&cb, 1), max_records - records_per_sector);
+    CHECK_EQ(flagged_record_count(&cb, 2), max_records - records_per_sector + 1);
     CHECK_OK(wl_unmount(0));
 }
 
@@ -356,6 +412,9 @@ static void test_remount_preserves_header_and_records(void) {
         CHECK_OK(circular_buffer_push_back(&cb, input));
     }
 
+    CHECK_OK(circular_buffer_clear_flag(&cb, 1, 0));
+    CHECK_OK(circular_buffer_clear_flag(&cb, 4, 0));
+
     for (i = 0; i < 3; ++i) {
         CHECK_OK(circular_buffer_pop_front(&cb, output));
         CHECK_EQ(read_record_id(output), i + 200);
@@ -365,6 +424,8 @@ static void test_remount_preserves_header_and_records(void) {
     mount_mock_storage();
     CHECK_OK(init_mock_buffer(&cb, record_size, 1, 0));
     CHECK_EQ(circular_buffer_get_record_num(&cb), 5);
+    CHECK_EQ(flagged_record_count(&cb, 0), 4);
+    CHECK_EQ(flagged_record_count(&cb, 1), 5);
 
     for (expected = 203; expected < 208; ++expected) {
         CHECK_OK(circular_buffer_pop_front(&cb, output));
@@ -603,6 +664,12 @@ static void run_randomized_model(size_t record_size, int overwrite) {
         }
 
         CHECK_EQ(circular_buffer_get_record_num(&cb), expected_count);
+        {
+            size_t flag;
+            for (flag = 0; flag < 4; ++flag) {
+                CHECK_EQ(flagged_record_count(&cb, flag), expected_count);
+            }
+        }
     }
 
     while (expected_count != 0) {
@@ -613,6 +680,10 @@ static void run_randomized_model(size_t record_size, int overwrite) {
     }
 
     CHECK_EQ(circular_buffer_get_record_num(&cb), 0);
+    CHECK_EQ(flagged_record_count(&cb, 0), 0);
+    CHECK_EQ(flagged_record_count(&cb, 1), 0);
+    CHECK_EQ(flagged_record_count(&cb, 2), 0);
+    CHECK_EQ(flagged_record_count(&cb, 3), 0);
     free(expected);
     free(output);
     free(input);
@@ -633,6 +704,7 @@ int main(void) {
     test_peek_at_reads_index_without_deleting();
     test_read_rejects_uncommitted_record();
     test_flagged_records_can_be_found_and_cleared();
+    test_overwrite_updates_flagged_record_counts();
     test_overwrite_wraps_without_ff_records();
     test_no_overwrite_reports_full_and_preserves_data();
     test_remount_preserves_header_and_records();

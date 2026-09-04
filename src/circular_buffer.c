@@ -120,10 +120,11 @@ static circular_buffer_err_t write_record_commit(CircularBuffer *cb, size_t inde
     return cb->write(cb->storage_ctx, addr + records_offset(cb) + cb->record_size, &commit, sizeof(commit));
 }
 
-static void clear_first_flagged_records(CircularBuffer *cb) {
+static void clear_flagged_record_cache(CircularBuffer *cb) {
     size_t i;
     for (i = 0; i < RECORD_FLAG_COUNT; ++i) {
         cb->first_flagged_record[i] = INVALID_RECORD_INDEX;
+        cb->flagged_record_num[i] = 0;
     }
 }
 
@@ -144,21 +145,22 @@ static circular_buffer_err_t find_first_flagged_record(CircularBuffer *cb, size_
     return CIRCULAR_BUFFER_OK;
 }
 
-static circular_buffer_err_t init_first_flagged_records(CircularBuffer *cb) {
+static circular_buffer_err_t init_flagged_record_cache(CircularBuffer *cb) {
     size_t index;
-    size_t found = 0;
 
-    clear_first_flagged_records(cb);
-    for (index = 0; index < cb->record_num && found < RECORD_FLAG_COUNT; ++index) {
+    clear_flagged_record_cache(cb);
+    for (index = 0; index < cb->record_num; ++index) {
         uint8_t commit;
         size_t flag;
         circular_buffer_err_t err = read_record_commit_raw(cb, index, &commit);
         if (err != CIRCULAR_BUFFER_OK) { return err; }
         if (!is_record_committed(commit)) { continue; }
         for (flag = 0; flag < RECORD_FLAG_COUNT; ++flag) {
-            if (cb->first_flagged_record[flag] == INVALID_RECORD_INDEX && is_record_flag_set(commit, flag)) {
-                cb->first_flagged_record[flag] = index;
-                ++found;
+            if (is_record_flag_set(commit, flag)) {
+                if (cb->first_flagged_record[flag] == INVALID_RECORD_INDEX) {
+                    cb->first_flagged_record[flag] = index;
+                }
+                ++cb->flagged_record_num[flag];
             }
         }
     }
@@ -240,7 +242,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
     cb->write = write;
     cb->record_size = record_size;
     cb->overwrite = overwrite;
-    clear_first_flagged_records(cb);
+    clear_flagged_record_cache(cb);
 
     sector_count = total_sectors(cb);
     if (user_header_sectors >= sector_count) { return CIRCULAR_BUFFER_ERR_INVALID_SIZE; }
@@ -300,7 +302,7 @@ circular_buffer_err_t circular_buffer_init(CircularBuffer *cb,
         if (err != CIRCULAR_BUFFER_OK) { return err; }
     }
 
-    if (cb->record_num != 0) { err = init_first_flagged_records(cb); }
+    if (cb->record_num != 0) { err = init_flagged_record_cache(cb); }
     return err;
 }
 
@@ -341,6 +343,7 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
     size_t slot_size;
     size_t back;
     size_t dropped_records = 0;
+    size_t dropped_flagged_records[RECORD_FLAG_COUNT] = {0};
     uint8_t commit = RECORD_FLAGS_MASK | RECORD_COMMIT_MAGIC;
 
     if (cb == NULL || src == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
@@ -356,6 +359,20 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
         uint32_t back_sec = (front_sec + full_secs + 1) % sec_num(cb);
         if (back_sec == front_sec) {
             if (cb->overwrite) {
+                size_t index;
+                for (index = 0; index < remaining_capacity_in_front_sector; ++index) {
+                    uint8_t dropped_commit;
+                    size_t flag;
+
+                    err = read_record_commit_raw(cb, index, &dropped_commit);
+                    if (err != CIRCULAR_BUFFER_OK) { return err; }
+                    if (!is_record_committed(dropped_commit)) { continue; }
+                    for (flag = 0; flag < RECORD_FLAG_COUNT; ++flag) {
+                        if (is_record_flag_set(dropped_commit, flag)) {
+                            ++dropped_flagged_records[flag];
+                        }
+                    }
+                }
                 cb->front = ((front_sec + 1) % sec_num(cb)) * sec_size;
                 cb->record_num -= remaining_capacity_in_front_sector;
                 dropped_records = remaining_capacity_in_front_sector;
@@ -380,6 +397,8 @@ circular_buffer_err_t circular_buffer_push_back(CircularBuffer *cb, void* src) {
         size_t flag;
         size_t new_index = cb->record_num - 1;
         for (flag = 0; flag < RECORD_FLAG_COUNT; ++flag) {
+            cb->flagged_record_num[flag] -= dropped_flagged_records[flag];
+            ++cb->flagged_record_num[flag];
             if (dropped_records != 0 && cb->first_flagged_record[flag] != INVALID_RECORD_INDEX) {
                 if (cb->first_flagged_record[flag] < dropped_records) {
                     err = find_first_flagged_record(cb, flag, 0, &cb->first_flagged_record[flag]);
@@ -472,6 +491,17 @@ circular_buffer_err_t circular_buffer_pop_front(CircularBuffer *cb, void* dest) 
  */
 uint32_t circular_buffer_get_record_num(CircularBuffer *cb) { return cb->record_num; }
 
+circular_buffer_err_t circular_buffer_get_record_num_with_flag(CircularBuffer *cb,
+                                                               size_t flag,
+                                                               size_t *record_num) {
+    if (cb == NULL || record_num == NULL || flag >= RECORD_FLAG_COUNT) {
+        return CIRCULAR_BUFFER_ERR_INVALID_ARG;
+    }
+
+    *record_num = cb->flagged_record_num[flag];
+    return CIRCULAR_BUFFER_OK;
+}
+
 size_t circular_buffer_get_user_header_sectors(CircularBuffer *cb) { return cb->user_header_sectors; }
 
 size_t circular_buffer_get_user_header_size(CircularBuffer *cb) { return user_header_size(cb); }
@@ -482,8 +512,11 @@ size_t circular_buffer_get_user_header_size(CircularBuffer *cb) { return user_he
  */
 circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb) {
     circular_buffer_err_t err;
+    uint8_t commit;
     if (cb == NULL) { return CIRCULAR_BUFFER_ERR_INVALID_ARG; }
     if (cb->record_num == 0) { return CIRCULAR_BUFFER_ERR_NOT_FOUND; }
+    err = read_record_commit_raw(cb, 0, &commit);
+    if (err != CIRCULAR_BUFFER_OK) { return err; }
     size_t sec_size = cb->sector_size;
     size_t slot_size = record_slot_size(cb);
     if (sec_size - (cb->front % sec_size) >= 2 * slot_size) { cb->front += slot_size; }
@@ -494,6 +527,9 @@ circular_buffer_err_t circular_buffer_delete_front(CircularBuffer *cb) {
     {
         size_t flag;
         for (flag = 0; flag < RECORD_FLAG_COUNT; ++flag) {
+            if (is_record_committed(commit) && is_record_flag_set(commit, flag)) {
+                --cb->flagged_record_num[flag];
+            }
             if (cb->first_flagged_record[flag] == INVALID_RECORD_INDEX) { continue; }
             if (cb->first_flagged_record[flag] == 0) {
                 err = find_first_flagged_record(cb, flag, 0, &cb->first_flagged_record[flag]);
@@ -516,9 +552,12 @@ circular_buffer_err_t circular_buffer_clear_flag(CircularBuffer *cb, size_t inde
 
     err = read_record_commit(cb, index, &commit);
     if (err != CIRCULAR_BUFFER_OK) { return err; }
+    bool was_set = is_record_flag_set(commit, flag);
     commit &= (uint8_t)~flag_mask(flag);
     err = write_record_commit(cb, index, commit);
     if (err != CIRCULAR_BUFFER_OK) { return err; }
+
+    if (was_set) { --cb->flagged_record_num[flag]; }
 
     if (cb->first_flagged_record[flag] == index) {
         err = find_first_flagged_record(cb, flag, index + 1, &cb->first_flagged_record[flag]);
@@ -532,6 +571,6 @@ circular_buffer_err_t circular_buffer_erase_all(CircularBuffer *cb) {
 
     cb->record_num = 0;
     cb->front = 0;
-    clear_first_flagged_records(cb);
+    clear_flagged_record_cache(cb);
     return write_header(cb);
 }
